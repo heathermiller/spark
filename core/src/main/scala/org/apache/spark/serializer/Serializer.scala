@@ -17,6 +17,8 @@
 
 package org.apache.spark.serializer
 
+import scala.reflect.ClassTag
+
 import java.io.{EOFException, InputStream, OutputStream}
 import java.nio.ByteBuffer
 
@@ -42,17 +44,17 @@ trait Serializer {
  * An instance of a serializer, for use by one thread at a time.
  */
 trait SerializerInstance {
-  def serialize[T](t: T): ByteBuffer
+  def serialize[T: ClassTag](t: T): ByteBuffer
 
-  def deserialize[T](bytes: ByteBuffer): T
+  def deserialize[T: ClassTag](bytes: ByteBuffer): T
 
-  def deserialize[T](bytes: ByteBuffer, loader: ClassLoader): T
+  def deserialize[T: ClassTag](bytes: ByteBuffer, loader: ClassLoader): T
 
   def serializeStream(s: OutputStream): SerializationStream
 
   def deserializeStream(s: InputStream): DeserializationStream
 
-  def serializeMany[T](iterator: Iterator[T]): ByteBuffer = {
+  def serializeMany[T: ClassTag](iterator: Iterator[T]): ByteBuffer = {
     // Default implementation uses serializeStream
     val stream = new FastByteArrayOutputStream()
     serializeStream(stream).writeAll(iterator)
@@ -69,16 +71,15 @@ trait SerializerInstance {
   }
 }
 
-
 /**
  * A stream for writing serialized objects.
  */
 trait SerializationStream {
-  def writeObject[T](t: T): SerializationStream
+  def writeObject[T: ClassTag](t: T): SerializationStream
   def flush(): Unit
   def close(): Unit
 
-  def writeAll[T](iter: Iterator[T]): SerializationStream = {
+  def writeAll[T: ClassTag](iter: Iterator[T]): SerializationStream = {
     while (iter.hasNext) {
       writeObject(iter.next())
     }
@@ -91,7 +92,7 @@ trait SerializationStream {
  * A stream for reading serialized objects.
  */
 trait DeserializationStream {
-  def readObject[T](): T
+  def readObject[T: ClassTag](): T
   def close(): Unit
 
   /**

@@ -19,14 +19,16 @@ package org.apache.spark.broadcast
 
 import org.apache.spark.SparkConf
 
+import scala.reflect.ClassTag
+
 /**
- * An interface for all the broadcast implementations in Spark (to allow 
+ * An interface for all the broadcast implementations in Spark (to allow
  * multiple broadcast implementations). SparkContext uses a user-specified
  * BroadcastFactory implementation to instantiate a particular broadcast for the
  * entire Spark job.
  */
 trait BroadcastFactory {
   def initialize(isDriver: Boolean, conf: SparkConf): Unit
-  def newBroadcast[T](value: T, isLocal: Boolean, id: Long): Broadcast[T]
+  def newBroadcast[T: ClassTag](value: T, isLocal: Boolean, id: Long): Broadcast[T]
   def stop(): Unit
 }

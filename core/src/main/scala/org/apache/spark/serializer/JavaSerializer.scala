@@ -23,9 +23,11 @@ import java.nio.ByteBuffer
 import org.apache.spark.util.ByteBufferInputStream
 import org.apache.spark.SparkConf
 
+import scala.reflect.ClassTag
+
 private[spark] class JavaSerializationStream(out: OutputStream) extends SerializationStream {
   val objOut = new ObjectOutputStream(out)
-  def writeObject[T](t: T): SerializationStream = { objOut.writeObject(t); this }
+  def writeObject[T: ClassTag](t: T): SerializationStream = { objOut.writeObject(t); this }
   def flush() { objOut.flush() }
   def close() { objOut.close() }
 }
@@ -37,12 +39,12 @@ extends DeserializationStream {
       Class.forName(desc.getName, false, loader)
   }
 
-  def readObject[T](): T = objIn.readObject().asInstanceOf[T]
+  def readObject[T: ClassTag](): T = objIn.readObject().asInstanceOf[T]
   def close() { objIn.close() }
 }
 
 private[spark] class JavaSerializerInstance extends SerializerInstance {
-  def serialize[T](t: T): ByteBuffer = {
+  def serialize[T: ClassTag](t: T): ByteBuffer = {
     val bos = new ByteArrayOutputStream()
     val out = serializeStream(bos)
     out.writeObject(t)
@@ -50,13 +52,13 @@ private[spark] class JavaSerializerInstance extends SerializerInstance {
     ByteBuffer.wrap(bos.toByteArray)
   }
 
-  def deserialize[T](bytes: ByteBuffer): T = {
+  def deserialize[T: ClassTag](bytes: ByteBuffer): T = {
     val bis = new ByteBufferInputStream(bytes)
     val in = deserializeStream(bis)
     in.readObject().asInstanceOf[T]
   }
 
-  def deserialize[T](bytes: ByteBuffer, loader: ClassLoader): T = {
+  def deserialize[T: ClassTag](bytes: ByteBuffer, loader: ClassLoader): T = {
     val bis = new ByteBufferInputStream(bytes)
     val in = deserializeStream(bis, loader)
     in.readObject().asInstanceOf[T]

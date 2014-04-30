@@ -29,7 +29,9 @@ import org.apache.spark.io.CompressionCodec
 import org.apache.spark.storage.{BroadcastBlockId, StorageLevel}
 import org.apache.spark.util.{MetadataCleaner, MetadataCleanerType, TimeStampedHashSet, Utils}
 
-private[spark] class HttpBroadcast[T](@transient var value_ : T, isLocal: Boolean, id: Long)
+import scala.reflect.ClassTag
+
+private[spark] class HttpBroadcast[T: ClassTag](@transient var value_ : T, isLocal: Boolean, id: Long)
   extends Broadcast[T](id) with Logging with Serializable {
 
   def value = value_
@@ -69,7 +71,7 @@ private[spark] class HttpBroadcast[T](@transient var value_ : T, isLocal: Boolea
 class HttpBroadcastFactory extends BroadcastFactory {
   def initialize(isDriver: Boolean, conf: SparkConf) { HttpBroadcast.initialize(isDriver, conf) }
 
-  def newBroadcast[T](value_ : T, isLocal: Boolean, id: Long) =
+  def newBroadcast[T: ClassTag](value_ : T, isLocal: Boolean, id: Long) =
     new HttpBroadcast[T](value_, isLocal, id)
 
   def stop() { HttpBroadcast.stop() }
@@ -148,7 +150,7 @@ private object HttpBroadcast extends Logging {
     files += file.getAbsolutePath
   }
 
-  def read[T](id: Long): T = {
+  def read[T: ClassTag](id: Long): T = {
     val url = serverUri + "/" + BroadcastBlockId(id).name
     val in = {
       val httpConnection = new URL(url).openConnection()
