@@ -25,6 +25,8 @@ import org.apache.spark.util.Utils
 
 import scala.reflect.ClassTag
 
+import scala.reflect.ClassTag
+
 /**
  * A broadcast variable. Broadcast variables allow the programmer to keep a read-only variable
  * cached on each machine rather than shipping a copy of it with tasks. They can be used, for

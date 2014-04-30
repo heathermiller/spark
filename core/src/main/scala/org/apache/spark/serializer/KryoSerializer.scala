@@ -35,6 +35,8 @@ import org.apache.spark.util.collection.CompactBuffer
 
 import scala.reflect.ClassTag
 
+import scala.reflect.ClassTag
+
 /**
  * A Spark serializer that uses the [[https://code.google.com/p/kryo/ Kryo serialization library]].
  *

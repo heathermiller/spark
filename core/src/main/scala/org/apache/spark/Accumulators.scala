@@ -19,6 +19,8 @@ package org.apache.spark
 
 import java.io.{ObjectInputStream, Serializable}
 
+import scala.reflect.ClassTag
+
 import scala.collection.generic.Growable
 import scala.collection.mutable.Map
 import scala.reflect.ClassTag

@@ -63,7 +63,6 @@ extends DeserializationStream {
   def close() { objIn.close() }
 }
 
-
 private[spark] class JavaSerializerInstance(counterReset: Int, defaultClassLoader: ClassLoader)
   extends SerializerInstance {
 
