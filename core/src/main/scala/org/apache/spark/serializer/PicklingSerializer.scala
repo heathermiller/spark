@@ -16,10 +16,28 @@ import org.apache.spark.scheduler.MapStatus
 import org.apache.spark.storage._
 import org.apache.spark.storage.{GetBlock, GotBlock, PutBlock}
 
+import org.apache.spark.scheduler.ShuffleMapTask
+import org.apache.spark.scheduler.DirectTaskResult
+import org.apache.spark.scheduler.MapStatus
+import org.apache.spark.ShuffleDependency
+import org.apache.spark.scheduler.ResultTask
+import org.apache.spark.rdd.FlatMappedRDD
 
 import scala.reflect.{ClassTag, classTag}
+import scala.reflect.runtime.{universe => ru}
 import scala.pickling._
 import binary._
+
+// for the movielens benchmark, this is what's serialized
+// along with the number of times each thing is serialied
+// ======================================================
+// (class org.apache.spark.scheduler.ShuffleMapTask,4007)
+// (class org.apache.spark.scheduler.DirectTaskResult,3951)
+// (class org.apache.spark.scheduler.MapStatus,3683)
+// (class org.apache.spark.ShuffleDependency,324)
+// (class org.apache.spark.scheduler.ResultTask,285)
+// (class org.apache.spark.rdd.FlatMappedRDD,260)
+
 
 /*
  this is how users can register picklers:
@@ -35,22 +53,35 @@ class PicklingSerializer extends org.apache.spark.serializer.Serializer {
     new PicklingSerializerInstance(this)
   }
 
-  def register[T: ClassTag](implicit pickler: SPickler[T], unpickler: Unpickler[T]): Unit = {
-    val ct = classTag[T]
-    val clazz = ct.runtimeClass
-    registry += (clazz -> (pickler -> unpickler))
-  }
+  // def register[T: ClassTag](implicit pickler: SPickler[T], unpickler: Unpickler[T]): Unit = {
+  //   val ct = classTag[T]
+  //   val clazz = ct.runtimeClass
+  //   registry += (clazz -> (pickler -> unpickler))
+  // }
+
+  def register[T: ClassTag: SPickler: Unpickler](): Unit = {
+   val clazz = classTag[T].runtimeClass
+   val p = implicitly[SPickler[T]]
+   val up = implicitly[Unpickler[T]]
+   GlobalRegistry.picklerMap += (clazz.getName() -> p)
+   GlobalRegistry.unpicklerMap += (clazz.getName() -> up)
+ }
 
   // register common types
-  register[StorageLevel](classTag[StorageLevel], StorageLevelPicklerUnpickler, StorageLevelPicklerUnpickler)
-  // register[PutBlock]
-  // register[GotBlock]
-  // register[GetBlock]
-  // register[MapStatus]
-  // register[BlockManagerId]
-  // register[Array[Byte]]
-  // register[Range[Int]]
-  // register[Range[Long]]
+  register[StorageLevel]//(classTag[StorageLevel], StorageLevelPicklerUnpickler, StorageLevelPicklerUnpickler)
+  register[PutBlock]
+  register[GotBlock]
+  register[GetBlock]
+  register[BlockManagerId]//(classTag[BlockManagerId], BlockManagerIdPicklerUnpickler, BlockManagerIdPicklerUnpickler)
+  register[MapStatus]
+  register[Array[Byte]]
+  register[Range]
+  // register[ShuffleMapTask]
+  register[DirectTaskResult[_]]
+  register[MapStatus]
+  // register[ShuffleDependency[_, _]]
+  // register[ResultTask[_, _]]
+  // register[FlatMappedRDD[_, _]]
 }
 
 class PicklingSerializerInstance(serializer: PicklingSerializer) extends SerializerInstance {
@@ -66,6 +97,12 @@ class PicklingSerializerInstance(serializer: PicklingSerializer) extends Seriali
     }
 
     val builder = format.createBuilder()
+
+    // need hintTag
+    val mirror: ru.Mirror = ru.runtimeMirror(clazz.getClassLoader) // expensive: try to do only once!
+    val tag = FastTypeTag.mkRaw(clazz, mirror)
+    builder.hintTag(tag)
+
     pickler.asInstanceOf[SPickler[T]].pickle(t, builder)
     val binPickle = builder.result()
     val arr = binPickle.value
@@ -142,6 +179,7 @@ class PicklingDeserializationStream(is: InputStream, format: BinaryPickleFormat,
 
     val pickle = BinaryPickleStream(is)
     val reader = format.createReader(pickle, scala.pickling.internal.currentMirror)
+    val typeString = reader.beginEntryNoTag()
     val result = unpickler.unpickle({ scala.pickling.FastTypeTag(clazz.getCanonicalName()) }, reader)
     //implicit val fastTag = FastTypeTag(clazz.getCanonicalName()).asInstanceOf[FastTypeTag[T]]
     //reader.unpickleTopLevel[T]
