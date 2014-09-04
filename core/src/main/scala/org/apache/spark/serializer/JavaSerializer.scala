@@ -59,7 +59,17 @@ extends DeserializationStream {
       Class.forName(desc.getName, false, loader)
   }
 
-  def readObject[T: ClassTag](): T = objIn.readObject().asInstanceOf[T]
+  var cnt = 0
+
+  def readObject[T: ClassTag](): T = {
+    val obj = objIn.readObject()
+    cnt += 1
+    if (cnt % 1000 == 0) {
+      println(s"readObject [#$cnt] of class ${obj.getClass.getName}")
+    }
+    obj.asInstanceOf[T]
+  }
+
   def close() { objIn.close() }
 }
 
