@@ -79,10 +79,15 @@ trait SerializationStream {
   def flush(): Unit
   def close(): Unit
 
+  def startIteration(): Unit = {}
+  def endIteration(): Unit = {}
+
   def writeAll[T: ClassTag](iter: Iterator[T]): SerializationStream = {
+    startIteration()
     while (iter.hasNext) {
       writeObject(iter.next())
     }
+    endIteration()
     this
   }
 }
@@ -95,17 +100,58 @@ trait DeserializationStream {
   def readObject[T: ClassTag](): T
   def close(): Unit
 
+  def startIteration(): Unit = {}
+  def endIteration(): Unit = {}
+
+  def approxTypeOf(t: Any): String = {
+    if (t == null) "null"
+    else if (t.isInstanceOf[Tuple2[_, _]]) {
+      val tup = t.asInstanceOf[Tuple2[Any, Any]]
+
+      val fstTypeName = {
+        val tupOne = tup._1
+        if (tupOne == null) "null"
+        else if (tupOne.isInstanceOf[Tuple2[_, _]]) {
+          val fstTup = tupOne.asInstanceOf[Tuple2[Any, Any]]
+          s"(${fstTup._1.getClass.getName},${fstTup._2.getClass.getName})"
+        } else tupOne.getClass.getName
+      }
+
+      val sndTypeName = {
+        val tupTwo = tup._2
+        if (tupTwo == null) "null"
+        else if (tupTwo.isInstanceOf[Tuple2[_, _]]) {
+          val sndTup = tupTwo.asInstanceOf[Tuple2[Any, Any]]
+          s"(${sndTup._1.getClass.getName},${sndTup._2.getClass.getName})"
+        } else tupTwo.getClass.getName
+      }
+
+      s"($fstTypeName,$sndTypeName)"
+    } else
+      t.getClass.getName
+  }
+
   /**
    * Read the elements of this stream through an iterator. This can only be called once, as
    * reading each element will consume data from the input source.
    */
   def asIterator: Iterator[Any] = new NextIterator[Any] {
+    var cnt = 0
+    // println(s"@@@ DeserializationStream.asIterator")
+    var prev: Any = _
+
     override protected def getNext() = {
       try {
-        readObject[Any]()
+        if (cnt == 0) startIteration()
+        cnt += 1
+        prev = readObject[Any]()
+        prev
       } catch {
         case eof: EOFException =>
+          // if (cnt > 500)
+          //   println(s"@@@@ DeserializationStream finished: $cnt, ${approxTypeOf(prev)}")
           finished = true
+          endIteration()
       }
     }
 
