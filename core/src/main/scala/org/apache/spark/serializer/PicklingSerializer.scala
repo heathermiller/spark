@@ -14,7 +14,7 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.util.{ByteBufferInputStream, NextIterator}
 import org.apache.spark.scheduler.MapStatus
 import org.apache.spark.storage._
-import org.apache.spark.storage.{GetBlock, GotBlock, PutBlock}
+import org.apache.spark.network.nio.{GetBlock, GotBlock, PutBlock}
 
 import org.apache.spark.scheduler.ShuffleMapTask
 import org.apache.spark.scheduler.DirectTaskResult
@@ -23,7 +23,7 @@ import org.apache.spark.ShuffleDependency
 import org.apache.spark.scheduler.ResultTask
 import org.apache.spark.rdd.FlatMappedRDD
 
-import it.unimi.dsi.fastutil.objects.Object2LongOpenHashMap
+// import it.unimi.dsi.fastutil.objects.Object2LongOpenHashMap
 
 import scala.reflect.{ClassTag, classTag}
 import scala.reflect.runtime.{universe => ru}
@@ -103,9 +103,9 @@ class PicklingSerializer extends org.apache.spark.serializer.Serializer {
   GlobalRegistry.picklerMap   += (defOpt2.getClass.getName() -> (x => anyRefOpt))
   GlobalRegistry.unpicklerMap += (defOpt2.getClass.getName() -> anyRefOpt)
 
-  val map = new Object2LongOpenHashMap[AnyRef]()
-  GlobalRegistry.picklerMap += (map.getClass.getName() -> (x => Object2LongOpenHashMapPickler))
-  GlobalRegistry.unpicklerMap += (map.getClass.getName() -> Object2LongOpenHashMapPickler)
+  // val map = new Object2LongOpenHashMap[AnyRef]()
+  // GlobalRegistry.picklerMap += (map.getClass.getName() -> (x => Object2LongOpenHashMapPickler))
+  // GlobalRegistry.unpicklerMap += (map.getClass.getName() -> Object2LongOpenHashMapPickler)
 
   GlobalRegistry.picklerMap += ("scala.collection.mutable.WrappedArray$ofRef" -> (x => mkAnyRefWrappedArrayPickler))
   GlobalRegistry.unpicklerMap += ("scala.collection.mutable.WrappedArray.ofRef[java.lang.Object]" -> mkAnyRefWrappedArrayPickler)
@@ -126,13 +126,13 @@ class PicklingSerializer extends org.apache.spark.serializer.Serializer {
   register[MapStatus]
   register[Array[Byte]]
   register[Range]
-  register[ShuffleMapTask]
+  // register[ShuffleMapTask]
   register[DirectTaskResult[_]]
   register[MapStatus]
   // register[ShuffleDependency[_, _]]
-  register[ResultTask[_, _]]
+  // register[ResultTask[_, _]]
   // register[FlatMappedRDD[_, _]]
-  register[Object2LongOpenHashMap[AnyRef]]
+  // register[Object2LongOpenHashMap[AnyRef]]
 
 
   picklerMap += ("scala.Tuple2$mcII$sp" -> (Tuple2IntIntPickler, implicitly[FastTypeTag[(Int, Int)]]))
@@ -900,80 +900,80 @@ object CustomPicklersUnpicklers {
     }
   }
 
-  implicit object Object2LongOpenHashMapPickler extends SPickler[Object2LongOpenHashMap[AnyRef]] with Unpickler[Object2LongOpenHashMap[AnyRef]] {
-    // println("using custom pickler...")
+  // implicit object Object2LongOpenHashMapPickler extends SPickler[Object2LongOpenHashMap[AnyRef]] with Unpickler[Object2LongOpenHashMap[AnyRef]] {
+  //   // println("using custom pickler...")
 
-    val format: PickleFormat = implicitly[PickleFormat]
+  //   val format: PickleFormat = implicitly[PickleFormat]
 
-    val mirror      = scala.reflect.runtime.currentMirror
+  //   val mirror      = scala.reflect.runtime.currentMirror
 
-    val collClass   = classOf[Object2LongOpenHashMap[AnyRef]]
-    val collTag     = FastTypeTag.mkRaw(collClass, mirror)
-    val classLoader = collClass.getClassLoader
+  //   val collClass   = classOf[Object2LongOpenHashMap[AnyRef]]
+  //   val collTag     = FastTypeTag.mkRaw(collClass, mirror)
+  //   val classLoader = collClass.getClassLoader
 
-    val defaultElem: (AnyRef, Long) = (new Object, 0L)
+  //   val defaultElem: (AnyRef, Long) = (new Object, 0L)
 
-    val elemTag     = //implicitly[FastTypeTag[(AnyRef, Long)]]
-      FastTypeTag.mkRaw(defaultElem.getClass, mirror)
-    val elemPickler = //implicitly[SPickler[(AnyRef, Long)]]
-      SPickler.genPickler(classLoader, defaultElem.getClass, elemTag).asInstanceOf[SPickler[AnyRef]]
-    val elemUnpickler =
-      Unpickler.genUnpickler(mirror, elemTag)
+  //   val elemTag     = //implicitly[FastTypeTag[(AnyRef, Long)]]
+  //     FastTypeTag.mkRaw(defaultElem.getClass, mirror)
+  //   val elemPickler = //implicitly[SPickler[(AnyRef, Long)]]
+  //     SPickler.genPickler(classLoader, defaultElem.getClass, elemTag).asInstanceOf[SPickler[AnyRef]]
+  //   val elemUnpickler =
+  //     Unpickler.genUnpickler(mirror, elemTag)
 
-    def pickle(coll: Object2LongOpenHashMap[AnyRef], builder: PBuilder): Unit = {
-      // println("custom Object2LongOpenHashMap pickler running...")
-      builder.hintTag(collTag)
-      builder.beginEntry(coll)
-      builder.beginCollection(coll.size)
+  //   def pickle(coll: Object2LongOpenHashMap[AnyRef], builder: PBuilder): Unit = {
+  //     // println("custom Object2LongOpenHashMap pickler running...")
+  //     builder.hintTag(collTag)
+  //     builder.beginEntry(coll)
+  //     builder.beginCollection(coll.size)
 
-      val entries = coll.object2LongEntrySet()
-      val iter = entries.fastIterator()
+  //     val entries = coll.object2LongEntrySet()
+  //     val iter = entries.fastIterator()
 
-      // println("writing elements...")
+  //     // println("writing elements...")
 
-      while (iter.hasNext) {
-        val elem = iter.next
-        val k: AnyRef = elem.getKey()
-        val v: Long   = elem.getLongValue()
+  //     while (iter.hasNext) {
+  //       val elem = iter.next
+  //       val k: AnyRef = elem.getKey()
+  //       val v: Long   = elem.getLongValue()
 
-        builder putElement { b =>
-          b.hintTag(elemTag)
-          val elem = k -> v
-          // print(s"$elem,")
-          elemPickler.pickle(k -> v, b)
-        }
-      }
+  //       builder putElement { b =>
+  //         b.hintTag(elemTag)
+  //         val elem = k -> v
+  //         // print(s"$elem,")
+  //         elemPickler.pickle(k -> v, b)
+  //       }
+  //     }
 
-      // println()
-      builder.endCollection()
-      builder.endEntry()
-    }
+  //     // println()
+  //     builder.endCollection()
+  //     builder.endEntry()
+  //   }
 
-    def unpickle(tag: => FastTypeTag[_], preader: PReader): Any = {
-      // println("custom Object2LongOpenHashMap unpickler running...")
-      val reader = preader.beginCollection()
+  //   def unpickle(tag: => FastTypeTag[_], preader: PReader): Any = {
+  //     // println("custom Object2LongOpenHashMap unpickler running...")
+  //     val reader = preader.beginCollection()
 
-      val length = reader.readLength()
-      val newMap = new Object2LongOpenHashMap[AnyRef]()
+  //     val length = reader.readLength()
+  //     val newMap = new Object2LongOpenHashMap[AnyRef]()
 
-      // println("reading elements...")
+  //     // println("reading elements...")
 
-      var i = 0
-      while (i < length) {
-        val r = reader.readElement()
-        r.beginEntryNoTag()
-        val elem = elemUnpickler.unpickle(elemTag, r).asInstanceOf[(AnyRef, Long)]
-        // print(s"$elem,")
-        r.endEntry()
-        newMap.put(elem._1, elem._2)
-        i = i + 1
-      }
+  //     var i = 0
+  //     while (i < length) {
+  //       val r = reader.readElement()
+  //       r.beginEntryNoTag()
+  //       val elem = elemUnpickler.unpickle(elemTag, r).asInstanceOf[(AnyRef, Long)]
+  //       // print(s"$elem,")
+  //       r.endEntry()
+  //       newMap.put(elem._1, elem._2)
+  //       i = i + 1
+  //     }
 
-      // println()
-      preader.endCollection()
-      newMap
-    }
-  }
+  //     // println()
+  //     preader.endCollection()
+  //     newMap
+  //   }
+  // }
 
   class DummyObjectInput(byte1: Byte, byte2: Byte) extends ObjectInput {
     var state = 0

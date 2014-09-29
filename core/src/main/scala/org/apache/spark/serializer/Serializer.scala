@@ -94,22 +94,6 @@ abstract class SerializerInstance {
   def serializeStream(s: OutputStream): SerializationStream
 
   def deserializeStream(s: InputStream): DeserializationStream
-
-  def serializeMany[T: ClassTag](iterator: Iterator[T]): ByteBuffer = {
-    // Default implementation uses serializeStream
-    val stream = new FastByteArrayOutputStream()
-    serializeStream(stream).writeAll(iterator)
-    val buffer = ByteBuffer.allocate(stream.position.toInt)
-    buffer.put(stream.array, 0, stream.position.toInt)
-    buffer.flip()
-    buffer
-  }
-
-  def deserializeMany(buffer: ByteBuffer): Iterator[Any] = {
-    // Default implementation uses deserializeStream
-    buffer.rewind()
-    deserializeStream(new ByteBufferInputStream(buffer)).asIterator
-  }
 }
 
 /**
