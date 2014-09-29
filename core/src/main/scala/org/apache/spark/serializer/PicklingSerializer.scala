@@ -1,7 +1,7 @@
 
 package org.apache.spark.serializer
 
-import java.io.{InputStream, OutputStream, DataInputStream, DataOutputStream, ObjectInput}
+import java.io.{InputStream, OutputStream, DataInputStream, DataOutputStream, ObjectInput, EOFException}
 import java.nio.ByteBuffer
 
 import scala.collection.mutable.{ArrayBuffer, Map, WrappedArray}
@@ -11,7 +11,7 @@ import scala.xml.{XML, NodeSeq}
 import org.apache.spark._
 import org.apache.spark.SparkContext._
 import org.apache.spark.rdd.RDD
-import org.apache.spark.util.ByteBufferInputStream
+import org.apache.spark.util.{ByteBufferInputStream, NextIterator}
 import org.apache.spark.scheduler.MapStatus
 import org.apache.spark.storage._
 import org.apache.spark.storage.{GetBlock, GotBlock, PutBlock}
@@ -27,8 +27,11 @@ import it.unimi.dsi.fastutil.objects.Object2LongOpenHashMap
 
 import scala.reflect.{ClassTag, classTag}
 import scala.reflect.runtime.{universe => ru}
-import scala.pickling._
-import binary._
+
+// import scala.pickling._
+// import binary._
+import scala.pickling.{OutputStreamOutput => _, _}
+import fastbinary.{FastOutputStreamOutput => OutputStreamOutput, _}
 
 // for the movielens benchmark, this is what's serialized
 // along with the number of times each thing is serialied
@@ -48,11 +51,18 @@ import binary._
 */
 class PicklingSerializer extends org.apache.spark.serializer.Serializer {
   import CustomPicklersUnpicklers._
+  import shareNothing._
+
+  val debugUnpicklerNohit =
+    System.getProperty("unpickler.nohit", "false") == "true"
 
   val registry: Map[Class[_], (SPickler[_], Unpickler[_])] = new TrieMap[Class[_], (SPickler[_], Unpickler[_])]
 
+  var picklerMap: Map[String, (SPickler[_], FastTypeTag[_])] = Map()
+  var unpicklerMap: Map[String, (Unpickler[Any], FastTypeTag[_])] = Map()
+
   def newInstance(): SerializerInstance = {
-    new PicklingSerializerInstance(this)
+    new PicklingSerializerInstance(this, picklerMap, unpicklerMap)
   }
 
   // def register[T: ClassTag](implicit pickler: SPickler[T], unpickler: Unpickler[T]): Unit = {
@@ -65,27 +75,47 @@ class PicklingSerializer extends org.apache.spark.serializer.Serializer {
    val clazz = classTag[T].runtimeClass
    val p = implicitly[SPickler[T]]
    val up = implicitly[Unpickler[T]]
-   println(s"registering for ${clazz.getName()} pickler of class type ${p.getClass.getName}...")
-   GlobalRegistry.picklerMap += (clazz.getName() -> p)
+   // println(s"registering for ${clazz.getName()} pickler of class type ${p.getClass.getName}...")
+   GlobalRegistry.picklerMap += (clazz.getName() -> (x => p))
    GlobalRegistry.unpicklerMap += (clazz.getName() -> up)
+  }
+
+  @volatile var intTuplePickler: Map[String, (SPickler[_], FastTypeTag[_])] = Map()
+
+  def registerIntTuplePickler(name: String, pickler: SPickler[_], unpickler: Unpickler[_], tag: FastTypeTag[_]): Unit = {
+    intTuplePickler += (name -> (pickler -> tag))
+
+    picklerMap += (s"(java.lang.Integer,$name)" -> (pickler, tag))
+
+    unpicklerMap += (s"scala.Tuple2[scala.Int,$name]" -> (unpickler.asInstanceOf[Unpickler[Any]] -> tag))
+  }
+
+  def registerPickler[T](pname: String, upname: String)(implicit pickler: SPickler[T], unpickler: Unpickler[T], tag: FastTypeTag[T]): Unit = {
+    picklerMap += (pname -> (pickler, tag))
+
+    unpicklerMap += (upname -> (unpickler.asInstanceOf[Unpickler[Any]], tag))
   }
 
   val defOpt1: Option[AnyRef] = None
   val defOpt2: Option[AnyRef] = Some(new Object)
-  GlobalRegistry.picklerMap   += (defOpt1.getClass.getName() -> anyRefOpt)
+  GlobalRegistry.picklerMap   += (defOpt1.getClass.getName() -> (x => anyRefOpt))
   GlobalRegistry.unpicklerMap += (defOpt1.getClass.getName() -> anyRefOpt)
-  GlobalRegistry.picklerMap   += (defOpt2.getClass.getName() -> anyRefOpt)
+  GlobalRegistry.picklerMap   += (defOpt2.getClass.getName() -> (x => anyRefOpt))
   GlobalRegistry.unpicklerMap += (defOpt2.getClass.getName() -> anyRefOpt)
 
   val map = new Object2LongOpenHashMap[AnyRef]()
-  GlobalRegistry.picklerMap += (map.getClass.getName() -> Object2LongOpenHashMapPickler)
+  GlobalRegistry.picklerMap += (map.getClass.getName() -> (x => Object2LongOpenHashMapPickler))
   GlobalRegistry.unpicklerMap += (map.getClass.getName() -> Object2LongOpenHashMapPickler)
 
-  GlobalRegistry.picklerMap += ("scala.collection.mutable.WrappedArray$ofRef" -> mkAnyRefWrappedArrayPickler)
+  GlobalRegistry.picklerMap += ("scala.collection.mutable.WrappedArray$ofRef" -> (x => mkAnyRefWrappedArrayPickler))
   GlobalRegistry.unpicklerMap += ("scala.collection.mutable.WrappedArray.ofRef[java.lang.Object]" -> mkAnyRefWrappedArrayPickler)
+  GlobalRegistry.picklerMap += ("scala.collection.mutable.WrappedArray$ofInt" -> (x => mkIntWrappedArrayPickler))
+  GlobalRegistry.unpicklerMap += ("scala.collection.mutable.WrappedArray$ofInt" -> mkIntWrappedArrayPickler)
 
-  GlobalRegistry.picklerMap += ("scala.collection.immutable.$colon$colon" -> implicitly[SPickler[::[AnyRef]]])
+  GlobalRegistry.picklerMap += ("scala.collection.immutable.$colon$colon" -> (x => implicitly[SPickler[::[AnyRef]]]))
   GlobalRegistry.unpicklerMap += ("scala.collection.immutable.$colon$colon[java.lang.Object]" -> implicitly[Unpickler[::[AnyRef]]])
+
+  GlobalRegistry.unpicklerMap += ("scala.Tuple2[scala.Int,scala.Int]" -> Tuple2IntIntPickler)
 
   // register common types
   //register[StorageLevel]//(classTag[StorageLevel], StorageLevelPicklerUnpickler, StorageLevelPicklerUnpickler)
@@ -103,77 +133,61 @@ class PicklingSerializer extends org.apache.spark.serializer.Serializer {
   register[ResultTask[_, _]]
   // register[FlatMappedRDD[_, _]]
   register[Object2LongOpenHashMap[AnyRef]]
+
+
+  picklerMap += ("scala.Tuple2$mcII$sp" -> (Tuple2IntIntPickler, implicitly[FastTypeTag[(Int, Int)]]))
+
+  {
+    val pickler = Tuple2IntIntDoublePickler
+    val tag = implicitly[FastTypeTag[((Int, Int), Double)]]
+    picklerMap += ("((java.lang.Integer,java.lang.Integer),java.lang.Double)" -> (pickler, tag))
+  }
+
+  // {
+  //   val pickler = Tuple2IntArrayDoublePickler
+  //   val tag = implicitly[FastTypeTag[(Int, Array[Double])]]
+  //   picklerMap += ("(java.lang.Integer,[D)" -> (pickler, tag))
+  // }
+
+  // {
+  //   val pickler = implicitly[SPickler[(Int, (Int, Array[Double]))]]
+  //   val tag = implicitly[FastTypeTag[(Int, (Int, Array[Double]))]]
+  //   picklerMap += ("(java.lang.Integer,(java.lang.Integer,[D))" -> (pickler, tag))
+  // }
+
+  unpicklerMap += ("scala.Tuple2" -> ((new Tuple2RTPickler(null)).asInstanceOf[Unpickler[Any]] -> FastTypeTag("scala.Tuple2")))
+  unpicklerMap += ("scala.Tuple2[scala.Int,scala.Int]" -> (Tuple2IntIntPickler.asInstanceOf[Unpickler[Any]] -> implicitly[FastTypeTag[(Int, Int)]]))
+  // unpicklerMap += ("scala.Tuple2[scala.Int,scala.Tuple2[scala.Int,scala.Array[scala.Double]]]" -> ((new Tuple2RTPickler(null)).asInstanceOf[Unpickler[Any]] -> implicitly[FastTypeTag[(Int, (Int, Array[Double]))]]))
+  unpicklerMap += ("scala.Long" -> (SPickler.longPicklerUnpickler.asInstanceOf[Unpickler[Any]] -> FastTypeTag.Long))
+
+  // FIXME: for some reason, we can't generate a MapStatus Unpickler if shareNothing is imported
+  GlobalRegistry.unpicklerMap.get("org.apache.spark.scheduler.MapStatus") match {
+    case None => /* do nothing */
+    case Some(up) =>
+      unpicklerMap += ("org.apache.spark.scheduler.MapStatus" -> (up.asInstanceOf[Unpickler[Any]] -> implicitly[FastTypeTag[MapStatus]]))
+  }
+
+  {
+    val unpickler = //implicitly[Unpickler[((Int, Int), Double)]]
+      Tuple2IntIntDoublePickler
+    val tag = implicitly[FastTypeTag[((Int, Int), Double)]]
+    unpicklerMap += ("scala.Tuple2[scala.Tuple2[scala.Int,scala.Int],scala.Double]" -> (unpickler.asInstanceOf[Unpickler[Any]], tag))
+  }
+
 }
 
-class PicklingSerializerInstance(serializer: PicklingSerializer) extends SerializerInstance {
+class PicklingSerializerInstance(serializer: PicklingSerializer,
+                                 picklerMap: Map[String, (SPickler[_], FastTypeTag[_])],
+                                 unpicklerMap: Map[String, (Unpickler[Any], FastTypeTag[_])]) extends SerializerInstance {
   val format = implicitly[BinaryPickleFormat]
 
   var checks = 0
 
   def serialize[T: ClassTag](t: T): ByteBuffer = {
-    /*
-    val ct = classTag[T]
-    val clazz = ct.runtimeClass
-    // look up pickler in registry
-    val pickler = serializer.registry.get(clazz) match {
-      case Some((p, _)) => p
-      case None => implicitly[SPickler[Any]]
-    }
+    // println(s"SPARK: pickling class '${t.getClass.getName}' as Any")
 
-    val builder = format.createBuilder()
-
-    // need hintTag
-    val mirror: ru.Mirror = ru.runtimeMirror(clazz.getClassLoader) // expensive: try to do only once!
-    val tag = FastTypeTag.mkRaw(clazz, mirror)
-    builder.hintTag(tag)
-
-    pickler.asInstanceOf[SPickler[T]].pickle(t, builder)
-    val binPickle = builder.result()
-    */
-    println(s"SPARK: pickling class '${t.getClass.getName}' as Any [2]")
     val binPickle = (t: Any).pickle
-
-    // println(s"pickled: ${binPickle.value.mkString("[", ",", "]")}")
-
-    // check whether pickling/unpickling is correct
-
-    val ut = binPickle.unpickle[Any]
-
-    assert(t.getClass.getName == ut.getClass.getName, "unpickled object has incorrect runtime class")
-    checks += 1
-    if (checks % 50 == 0)
-      print("#")
-
-    if (t.getClass.isArray) {
-      val arr1 = t.asInstanceOf[Array[AnyRef]]
-      val arr2 = ut.asInstanceOf[Array[AnyRef]]
-      val zipped = arr1.zip(arr2)
-      val wrongElem = zipped.find { case (el1, el2) => el1 != el2 }
-      assert(wrongElem.isEmpty, s"!!! found unequal elem: $wrongElem")
-    } else {
-      (t, ut) match {
-        case (Some(stuff1), Some(stuff2)) =>
-          println(s"!!! contained in Option: ${stuff1.getClass.getName}")
-
-          val m1 = stuff1.asInstanceOf[Object2LongOpenHashMap[AnyRef]]
-          val m2 = stuff2.asInstanceOf[Object2LongOpenHashMap[AnyRef]]
-
-          val values1 = m1.values().toLongArray()
-          val values2 = m2.values().toLongArray()
-
-          val vs1 = values1.mkString("[", ",", "]")
-          val vs2 = values2.mkString("[", ",", "]")
-          assert(values1.length == values2.length, s"values sizes unqual: ${values1.length}, ${values2.length}")
-
-        case _ =>
-          // do nothing
-      }
-    }
-
     val arr = binPickle.value
-
-    // first create an array
-    // then turn into ByteBuffer
     ByteBuffer.wrap(arr)
   }
 
@@ -190,87 +204,149 @@ class PicklingSerializerInstance(serializer: PicklingSerializer) extends Seriali
   }
 
   def serializeStream(s: OutputStream): SerializationStream = {
-    new PicklingSerializationStream(s, format, serializer)
+    new PicklingSerializationStream(s, format, serializer, picklerMap)
   }
 
   def deserializeStream(s: InputStream): DeserializationStream = {
-    new PicklingDeserializationStream(s, format, serializer)
+    new PicklingDeserializationStream(s, format, serializer, unpicklerMap)
   }
 }
 
-// TODO: should be added to pickling
-class OutputStreamOutput(out: OutputStream) extends ArrayOutput[Byte] {
+class PicklingSerializationStream(os: OutputStream, format: BinaryPickleFormat, serializer: PicklingSerializer, picklerMap: Map[String, (SPickler[_], FastTypeTag[_])]) extends SerializationStream {
+  import CustomPicklersUnpicklers._
 
-  def result(): Array[Byte] =
-    null
-
-  def +=(obj: Byte) =
-    out.write(obj.asInstanceOf[Int])
-
-  def put(obj: Array[Byte]): this.type = {
-    out.write(obj)
-    this
-  }
-}
-
-class PicklingSerializationStream(os: OutputStream, format: BinaryPickleFormat, serializer: PicklingSerializer) extends SerializationStream {
-  // create an OutputStreamOutput
   val osOutput = new OutputStreamOutput(os)
+  val builder = format.createBuilder(osOutput)
+
+  var cnt = 0
+
+  def classOf(x: Any): String =
+    if (x == null) "null" else x.getClass.getName
+
+  def approxTypeOf(t: Any): String = {
+    if (t == null) "null"
+    else {
+      val name = t.getClass.getName
+
+      if (name == "scala.Tuple2") {
+        val tup = t.asInstanceOf[Tuple2[Any, Any]]
+
+        val fstTypeName = {
+          val tupOne = tup._1
+          if (tupOne == null) "null"
+          else if (tupOne.isInstanceOf[Tuple2[_, _]]) {
+            val fstTup = tupOne.asInstanceOf[Tuple2[Any, Any]]
+            s"(${fstTup._1.getClass.getName},${fstTup._2.getClass.getName})"
+          } else tupOne.getClass.getName
+        }
+
+        val sndTypeName = {
+          val tupTwo = tup._2
+          if (tupTwo == null) "null"
+          else if (tupTwo.isInstanceOf[Tuple2[_, _]]) {
+            val sndTup = tupTwo.asInstanceOf[Tuple2[Any, Any]]
+            s"(${sndTup._1.getClass.getName},${sndTup._2.getClass.getName})"
+          } else tupTwo.getClass.getName
+        }
+
+        s"($fstTypeName,$sndTypeName)"
+      } else
+        name
+    }
+  }
+
+  var started = false
+  var pickler: SPickler[_] = null
+  var tag: FastTypeTag[_] = null
+
+  override def startIteration(): Unit = {
+    started = true
+    pickler = null
+    tag = null
+  }
+
+  override def endIteration(): Unit = {
+    started = false
+    pickler = null
+    tag = null
+  }
 
   var checks = 0
 
   def writeObject[T: ClassTag](t: T): SerializationStream = {
-    def classOfElem(x: AnyRef): String =
-      if (x == null) "null" else x.getClass.getName
+    cnt += 1
 
-    val className = t.getClass.getName
-    // println(s"SPARK: pickling class '$className' as Any to OutputStream")
-    if (className.contains("WrappedArray")) {
-      val wa = t.asInstanceOf[WrappedArray.ofRef[AnyRef]]
-      println(s"PICKLING: WrappedArray.ofRef[AnyRef] of size: ${wa.length}")
-      val p = (t: Any).pickle
-      val up = p.unpickle[Any]
-      val wa2 = up.asInstanceOf[WrappedArray.ofRef[AnyRef]]
-      println(s"PICKLING: Unpickled WrappedArray.ofRef[AnyRef] of size: ${wa2.length}")
+    if (pickler == null) {
+      val typeString = approxTypeOf(t)
+      picklerMap.get(typeString) match {
+        case None => /* do nothing */
+        case Some((pickler1, tag1)) =>
+          pickler = pickler1
+          tag = tag1
+      }
     }
 
-    // if (className.contains("Tuple2")) {
-    //   val p = (t: Any).pickle
-    //   val up = p.unpickle[Any]
-    //   val t1 = t.asInstanceOf[(AnyRef, AnyRef)]
-    //   val t2 = up.asInstanceOf[(AnyRef, AnyRef)]
-    //   val s1 = classOfElem(t1._1) + "," + classOfElem(t1._2)
-    //   val s2 = classOfElem(t2._1) + "," + classOfElem(t2._2)
-    //   println(s1)
-    //   assert(s1 == s2)
-    // }
-/*
-    val ct = classTag[T]
-    val clazz = ct.runtimeClass
-    val pickler = serializer.registry.get(clazz) match {
-      case Some((p, _)) => p
-      case None => implicitly[SPickler[Any]]
-    }
-    val builder = format.createBuilder(osOutput)
-    pickler.asInstanceOf[SPickler[T]].pickle(t, builder)
-*/
-    (t: Any).pickleTo(osOutput)
-
-    val binPickle = (t: Any).pickle
-    val ut = binPickle.unpickle[Any]
-
-    assert(t.getClass.getName == ut.getClass.getName, "unpickled object has incorrect runtime class")
-    checks += 1
-    if (checks % 500 == 0) {
-      // if (t.getClass.getName.contains("Tuple2")) {
-      //   println("BEFORE:")
-      //   println(t.toString)
-      //   println("AFTER:")
-      //   println(ut.toString)
-      // } else
-        print("o")
+    if (pickler == null) {
+      // println(s"NO HIT: $typeString")
+      (t: Any).pickleInto(builder)
+    } else {
+      // scala.pickling.internal.GRL.lock()
+      builder.hintTag(tag)
+      pickler.asInstanceOf[SPickler[Any]].pickle(t, builder)
+      // scala.pickling.internal.GRL.unlock()
     }
 
+    // TODO: avoid if part of same iteration
+    if (!started) {
+      pickler = null
+      tag = null
+    }
+
+    this
+  }
+
+  override def writeAll[T: ClassTag](iter: Iterator[T]): SerializationStream = {
+    var loader: ClassLoader = null
+    tag = null
+    pickler = null
+
+    if (iter.hasNext) {
+      val t = iter.next()
+
+      val typeString = approxTypeOf(t)
+      picklerMap.get(typeString) match {
+        case None => /* do nothing */
+        case Some((pickler1, tag1)) =>
+          pickler = pickler1
+          tag = tag1
+      }
+
+      if (pickler == null) {
+        // create tag
+        val clazz = t.getClass
+        tag = FastTypeTag.mkRaw(clazz, scala.reflect.runtime.currentMirror)
+        // create pickler
+        loader = clazz.getClassLoader
+        pickler = SPickler.genPickler(loader, clazz, tag)
+      }
+
+      // write tag
+      builder.hintTag(tag)
+      // pickle first value
+      pickler.asInstanceOf[SPickler[Any]].pickle(t, builder)
+    }
+
+    while (iter.hasNext) {
+      val t = iter.next()
+
+      builder.hintTag(tag)
+      builder.hintStaticallyElidedType()
+
+      pickler.asInstanceOf[SPickler[Any]].pickle(t, builder)
+    }
+
+    tag = null
+    pickler = null
     this
   }
 
@@ -278,36 +354,228 @@ class PicklingSerializationStream(os: OutputStream, format: BinaryPickleFormat, 
   def close() { os.close() }
 }
 
-class PicklingDeserializationStream(is: InputStream, format: BinaryPickleFormat, serializer: PicklingSerializer) extends DeserializationStream {
+class PicklingDeserializationStream(is: InputStream,
+                                    format: BinaryPickleFormat,
+                                    serializer: PicklingSerializer,
+                                    unpicklerMap: Map[String, (Unpickler[Any], FastTypeTag[_])]) extends DeserializationStream {
+  import CustomPicklersUnpicklers._
+  import shareNothing._
+
+  val debugUnpicklerNohit = serializer.debugUnpicklerNohit
+
+  val pickle = BinaryPickleStream(is)
+  val reader = format.createReader(pickle, scala.pickling.internal.currentMirror)
+  val anyTag = implicitly[scala.pickling.FastTypeTag[Any]]
+
   var cnt = 0
+
+  var lastTen: List[Any] = List()
+
+  val debugOn = false
+
+  def classOf(x: Any): String =
+    if (x == null) "null" else x.getClass.getName
+
+  var started = false // if true, will not reset unpickler/tag to null
+  var unpickler: Unpickler[Any] = null
+  var tag: FastTypeTag[_] = null
+
+  override def startIteration(): Unit = {
+    started = true // not reset unpickler/tag until endIteration() has been signalled
+    unpickler = null
+    tag = null
+  }
+
+  override def endIteration(): Unit = {
+    started = false
+    unpickler = null
+    tag = null
+  }
+
   def readObject[T: ClassTag](): T = {
-    /*
-    val ct = classTag[T]
-    val clazz = ct.runtimeClass
-    val unpickler = serializer.registry.get(clazz) match {
-      case Some((_, up)) => up
-      case None => implicitly[Unpickler[Any]]
-    }
-
-    val pickle = BinaryPickleStream(is)
-    val reader = format.createReader(pickle, scala.pickling.internal.currentMirror)
-    val typeString = reader.beginEntryNoTag()
-    val result = unpickler.unpickle({ scala.pickling.FastTypeTag(clazz.getCanonicalName()) }, reader)
-    //implicit val fastTag = FastTypeTag(clazz.getCanonicalName()).asInstanceOf[FastTypeTag[T]]
-    //reader.unpickleTopLevel[T]
-
-    //val reader = format.createReader(isInput)
-    //pickler.asInstanceOf[SPickler[T]].pickle(t, builder)
-    //throw new UnsupportedOperationException()
-    */
-
-    val pickle = BinaryPickleStream(is)
-    val result = pickle.unpickle[Any]
     cnt += 1
-    if (cnt % 500 == 0) {
-      println(s"readObject of class '${result.getClass.getName}'")
+    val debugOn = cnt % 1000 == 0
+
+    reader.hintTag(anyTag)
+
+    val typeStringOpt = try {
+      Some(reader.beginEntryNoTagDebug(debugOn))
+    } catch {
+      case PicklingException(msg) =>
+        println(s"error in PicklingDeserializationStream:\n$msg")
+        None
+      case _: java.lang.RuntimeException =>
+        None
     }
-    result.asInstanceOf[T]
+    if (typeStringOpt.isEmpty) {
+      throw new java.io.EOFException
+    } else {
+
+      if (unpickler == null) {
+        val typeString = typeStringOpt.get
+
+        // select tag and unpickler based on typeString
+        unpicklerMap.get(typeString) match {
+          case None =>
+            // if (typeString.startsWith("scala.Tuple2"))
+            // if (debugUnpicklerNohit && debugOn)
+            //   println(s"NO HIT: last typeString: $typeString")
+
+            scala.pickling.internal.GRL.lock()
+            tag = FastTypeTag(typeString)
+            unpickler = Unpickler.genUnpickler(reader.mirror, tag)(ShareNothing).asInstanceOf[Unpickler[Any]]
+            scala.pickling.internal.GRL.unlock()
+          case Some(pair) =>
+            // if (debugOn)
+            //   println(s"HIT: last typeString: $typeString")
+
+            unpickler = pair._1
+            tag = pair._2
+        }
+      }
+
+      val result = try {
+        unpickler.unpickle({ FastTypeTag(typeStringOpt.get) }, reader)
+      } catch {
+        case e @ PicklingException(msg) =>
+          println(s"error in PicklingDeserializationStream:\n$msg\nlast ten objects read: $lastTen")
+          throw e
+        case e: EndOfStreamException =>
+          println(s"error in PicklingDeserializationStream:\nlast ten objects read: $lastTen")
+          throw e
+      }
+
+      if (!started) {
+        unpickler = null
+        tag = null
+      }
+
+      result.asInstanceOf[T]
+    }
+  }
+
+  override def asIterator: Iterator[Any] = new NextIterator[Any] {
+    var localCnt = 0
+    var prev: Any = _
+    unpickler = null
+    tag = null
+
+    override protected def getNext() = {
+      // try {
+      val resOpt =
+        if (localCnt == 0) {
+          // startIteration()
+
+          reader.hintTag(anyTag)
+
+          val typeStringOpt = try {
+            Some(reader.beginEntryNoTagDebug(debugOn))
+          } catch {
+            case PicklingException(msg) =>
+              println(s"error in PicklingDeserializationStream:\n$msg")
+              None
+            case _: java.lang.RuntimeException =>
+              None
+          }
+          if (typeStringOpt.isEmpty) {
+            // throw new java.io.EOFException
+            None
+          } else {
+
+            val typeString = typeStringOpt.get
+            // println(s"type string (0): $typeString")
+
+            // select tag and unpickler based on typeString
+            unpicklerMap.get(typeString) match {
+              case None =>
+                // if (typeString.startsWith("scala.Tuple2"))
+                // if (debugUnpicklerNohit && debugOn)
+                //   println(s"NO HIT: last typeString: $typeString")
+
+                scala.pickling.internal.GRL.lock()
+                tag = FastTypeTag(typeString)
+                unpickler = Unpickler.genUnpickler(reader.mirror, tag)(ShareNothing).asInstanceOf[Unpickler[Any]]
+                scala.pickling.internal.GRL.unlock()
+              case Some(pair) =>
+                // if (debugOn)
+                //   println(s"HIT: last typeString: $typeString")
+
+                unpickler = pair._1
+                tag = pair._2
+            }
+
+            val result = try {
+              unpickler.unpickle({ FastTypeTag(typeStringOpt.get) }, reader)
+            } catch {
+              case e @ PicklingException(msg) =>
+                println(s"error in PicklingDeserializationStream:\n$msg\nlast ten objects read: $lastTen")
+                throw e
+              case e: EndOfStreamException =>
+                println(s"error in PicklingDeserializationStream:\nlast ten objects read: $lastTen")
+                throw e
+            }
+
+            localCnt += 1
+            Some(result)//.asInstanceOf[T]
+          }
+        } else { // localCnt > 0
+          reader.hintTag(tag)
+          reader.hintStaticallyElidedType()
+
+          val typeStringOpt = try {
+            Some(reader.beginEntryNoTagDebug(debugOn))
+          } catch {
+            case PicklingException(msg) =>
+              println(s"error in PicklingDeserializationStream:\n$msg")
+              None
+            case _: java.lang.RuntimeException =>
+              None
+          }
+
+          // if (localCnt == 1)
+          //   println(s"type string (1): $typeStringOpt")
+
+          if (typeStringOpt.isEmpty) {
+            // throw new java.io.EOFException
+            None
+          } else {
+
+            val result = try {
+              unpickler.unpickle(/*{ FastTypeTag(typeStringOpt.get) }*/tag, reader)
+            } catch {
+              case e @ PicklingException(msg) =>
+                println(s"error in PicklingDeserializationStream:\n$msg\nlast ten objects read: $lastTen")
+                throw e
+              case e: EndOfStreamException =>
+                println(s"error in PicklingDeserializationStream:\nlast ten objects read: $lastTen")
+                throw e
+            }
+
+            localCnt += 1
+            Some(result)
+          }
+        }
+
+      if (resOpt.isEmpty) {
+        finished = true
+        // endIteration()
+      } else {
+        prev = resOpt.get
+        prev
+      }
+
+      // } catch {
+      //   case eof: EOFException =>
+      //     // if (cnt > 500)
+      //     //   println(s"@@@@ DeserializationStream finished: $cnt, ${approxTypeOf(prev)}")
+      //     finished = true
+      //     endIteration()
+      // }
+    }
+
+    override protected def close() {
+      PicklingDeserializationStream.this.close()
+    }
   }
 
   def close() { is.close() }
@@ -317,6 +585,219 @@ class PicklingDeserializationStream(is: InputStream, format: BinaryPickleFormat,
 
 object CustomPicklersUnpicklers {
   import SPickler._
+  import shareNothing._
+
+  class SpecialTuple2Pickler(tag1: FastTypeTag[_], pickler1: SPickler[Any], tag2: FastTypeTag[_], pickler2: SPickler[Any])
+      extends SPickler[(Any, Any)] {
+    val format = implicitly[PickleFormat]
+
+    def pickle(picklee: (Any, Any), builder: PBuilder): Unit = {
+      // println(s"@@@ using dynamic specialized ${this.getClass.getName}")
+      builder.beginEntry(picklee)
+      builder.putField("_1", b => {
+        b.hintTag(tag1)
+        pickler1.pickle(picklee._1, b)
+      })
+      builder.putField("_2", b => {
+        b.hintTag(tag2)
+        pickler2.pickle(picklee._2, b)
+      })
+      builder.endEntry()
+    }
+  }
+
+  object Tuple2IntIntPickler extends SPickler[(Int, Int)] with Unpickler[(Int, Int)] {
+    import SPickler._
+
+    val format = implicitly[PickleFormat]
+
+    def pickle(picklee: (Int, Int), builder: PBuilder): Unit = {
+      // println(s"@@@ using static specialized ${this.getClass.getName}")
+      builder.beginEntry(picklee)
+
+      builder.pushHints()
+      builder.hintTag(implicitly[FastTypeTag[Int]])
+      builder.hintStaticallyElidedType()
+      builder.pinHints()
+
+      builder.putField("_1", b => {
+        intPicklerUnpickler.pickle(picklee._1, b)
+      })
+
+      builder.putField("_2", b => {
+        intPicklerUnpickler.pickle(picklee._2, b)
+      })
+
+      builder.popHints()
+      builder.endEntry()
+    }
+
+    def unpickle(tpe: => FastTypeTag[_], reader: PReader): Any = {
+      // println(s"@@@ using static specialized ${this.getClass.getName}")
+      reader.hintTag(implicitly[FastTypeTag[Int]])
+      reader.hintStaticallyElidedType()
+      reader.pinHints()
+
+      val reader1 = reader.readField("_1")
+      val ts1 = reader1.beginEntryNoTag()
+      val value1 = reader1.readPrimitive()
+
+      val reader2 = reader.readField("_2")
+      val ts2 = reader2.beginEntryNoTag()
+      val value2 = reader2.readPrimitive()
+
+      (value1, value2)
+    }
+  }
+
+  object Tuple2IntIntDoublePickler extends SPickler[((Int, Int), Double)] with Unpickler[((Int, Int), Double)] {
+    import SPickler._
+
+    val format = implicitly[PickleFormat]
+
+    def pickle(picklee: ((Int, Int), Double), builder: PBuilder): Unit = {
+      // println(s"@@@ using static specialized ${this.getClass.getName}")
+      builder.beginEntry(picklee)
+
+      builder.hintTag(implicitly[FastTypeTag[(Int, Int)]])
+      builder.hintStaticallyElidedType()
+
+      builder.putField("_1", b => {
+        Tuple2IntIntPickler.pickle(picklee._1, b)
+      })
+
+      builder.hintTag(implicitly[FastTypeTag[Double]])
+      builder.hintStaticallyElidedType()
+
+      builder.putField("_2", b => {
+        doublePicklerUnpickler.pickle(picklee._2, b)
+      })
+
+      builder.endEntry()
+    }
+
+    def unpickle(tpe: => FastTypeTag[_], reader: PReader): Any = {
+      // println(s"@@@ using static specialized ${this.getClass.getName}")
+      val tag1 = implicitly[FastTypeTag[(Int, Int)]]
+      reader.hintTag(tag1)
+      reader.hintStaticallyElidedType()
+
+      val reader1 = reader.readField("_1")
+      val ts1 = reader1.beginEntryNoTag()
+      val value1 = Tuple2IntIntPickler.unpickle(tag1, reader1)
+      reader1.endEntry()
+
+      reader.hintTag(FastTypeTag.Double)
+      reader.hintStaticallyElidedType()
+      val reader2 = reader.readField("_2")
+      val ts2 = reader2.beginEntryNoTag()
+      val value2 = reader2.readPrimitive()
+      reader2.endEntry()
+
+      (value1, value2)
+    }
+  }
+
+  object Tuple2IntArrayDoublePickler extends SPickler[(Int, Array[Double])] with Unpickler[(Int, Array[Double])] {
+    import SPickler._
+
+    val format = null
+
+    def pickle(picklee: (Int, Array[Double]), builder: PBuilder): Unit = {
+      // println(s"@@@ using static specialized ${this.getClass.getName}")
+      builder.hintKnownSize(8 * picklee._2.length + 66)
+      builder.beginEntry(picklee)
+
+      builder.hintTag(FastTypeTag.Int)
+      builder.hintStaticallyElidedType()
+      builder.putField("_1", b => {
+        intPicklerUnpickler.pickle(picklee._1, b)
+      })
+
+      builder.hintTag(FastTypeTag.ArrayDouble)
+      builder.hintStaticallyElidedType()
+      builder.putField("_2", b => {
+        doubleArrPicklerUnpickler.pickle(picklee._2, b)
+      })
+
+      builder.endEntry()
+    }
+
+    def unpickle(tpe: => FastTypeTag[_], reader: PReader): Any = {
+      // println(s"@@@ using static specialized ${this.getClass.getName}")
+      reader.hintTag(FastTypeTag.Int)
+      reader.hintStaticallyElidedType()
+      val reader1 = reader.readField("_1")
+      val ts1 = reader1.beginEntryNoTag()
+      val value1 = reader1.readPrimitive()
+
+      reader.hintTag(FastTypeTag.ArrayDouble)
+      reader.hintStaticallyElidedType()
+      val reader2 = reader.readField("_2")
+      val ts2 = reader2.beginEntryNoTag()
+      val value2 = reader2.readPrimitive()
+
+      (value1, value2)
+    }
+  }
+
+  def mkIntWrappedArrayPickler:
+    SPickler[WrappedArray[Int]] with Unpickler[WrappedArray[Int]] =
+      new SPickler[WrappedArray[Int]] with Unpickler[WrappedArray[Int]] {
+
+    val format: PickleFormat = null // unused
+
+    val mirror = scala.reflect.runtime.currentMirror
+
+    def pickle(coll: WrappedArray[Int], builder: PBuilder): Unit = {
+      builder.beginEntry(coll)
+      builder.beginCollection(coll.size)
+
+      builder.pushHints()
+      builder.hintStaticallyElidedType()
+      builder.hintTag(FastTypeTag.Int)
+      builder.pinHints()
+
+      coll.foreach { (elem: Int) =>
+        builder putElement { b =>
+          val pickler = SPickler.intPicklerUnpickler
+          pickler.pickle(elem, b)
+        }
+      }
+
+      builder.popHints()
+      builder.endCollection()
+      builder.endEntry()
+    }
+
+    def unpickle(tpe: => FastTypeTag[_], preader: PReader): Any = {
+      val reader = preader.beginCollection()
+
+      preader.pushHints()
+      reader.hintStaticallyElidedType()
+      reader.hintTag(FastTypeTag.Int)
+      reader.pinHints()
+
+      val length = reader.readLength()
+      val elemClass = (0).getClass
+      val newArray = java.lang.reflect.Array.newInstance(elemClass, length).asInstanceOf[Array[Int]]
+
+      var i = 0
+      while (i < length) {
+        val r = reader.readElement()
+        r.beginEntryNoTag()
+        val elemUnpickler = Unpickler.intPicklerUnpickler
+        val elem = elemUnpickler.unpickle(FastTypeTag.Int, r)
+        r.endEntry()
+        newArray(i) = elem.asInstanceOf[Int]
+        i = i + 1
+      }
+
+      preader.popHints()
+      preader.endCollection()
+      new WrappedArray.ofInt(newArray)
+    }
+  }
 
   def mkAnyRefWrappedArrayPickler(implicit pf: PickleFormat):
     SPickler[WrappedArray.ofRef[AnyRef]] with Unpickler[WrappedArray.ofRef[AnyRef]] =
@@ -358,7 +839,7 @@ object CustomPicklersUnpicklers {
       while (i < length) {
         val r = reader.readElement()
         val elemTag = r.beginEntry()
-        val elemUnpickler = Unpickler.genUnpickler(mirror, elemTag)
+        val elemUnpickler = Unpickler.genUnpickler(mirror, elemTag)(ShareNothing)
         val elem = elemUnpickler.unpickle(elemTag, r)
         r.endEntry()
         newArray(i) = elem.asInstanceOf[AnyRef]
@@ -375,7 +856,7 @@ object CustomPicklersUnpicklers {
     val mirror = scala.reflect.runtime.currentMirror
 
     def pickle(picklee: Option[AnyRef], builder: PBuilder): Unit = {
-      println(s"anyRefOpt pickler running...")
+      // println(s"anyRefOpt pickler running...")
       builder.beginEntry(picklee)
       builder.putField("empty", b => {
         b.hintTag(implicitly[FastTypeTag[Int]])
@@ -385,7 +866,7 @@ object CustomPicklersUnpicklers {
       if (picklee.nonEmpty) {
         val elem        = picklee.get
         val elemClass   = elem.getClass
-        println(s"element class: ${elemClass.getName}")
+        // println(s"element class: ${elemClass.getName}")
         val elemTag     = FastTypeTag.mkRaw(elemClass, mirror)
         val classLoader = elemClass.getClassLoader
         builder.putField("value", b => {
@@ -440,7 +921,7 @@ object CustomPicklersUnpicklers {
       Unpickler.genUnpickler(mirror, elemTag)
 
     def pickle(coll: Object2LongOpenHashMap[AnyRef], builder: PBuilder): Unit = {
-      println("custom Object2LongOpenHashMap pickler running...")
+      // println("custom Object2LongOpenHashMap pickler running...")
       builder.hintTag(collTag)
       builder.beginEntry(coll)
       builder.beginCollection(coll.size)
@@ -469,7 +950,7 @@ object CustomPicklersUnpicklers {
     }
 
     def unpickle(tag: => FastTypeTag[_], preader: PReader): Any = {
-      println("custom Object2LongOpenHashMap unpickler running...")
+      // println("custom Object2LongOpenHashMap unpickler running...")
       val reader = preader.beginCollection()
 
       val length = reader.readLength()
@@ -527,7 +1008,7 @@ object CustomPicklersUnpicklers {
    def skip(x$1: Long): Long = ???
   }
 
-  implicit object StorageLevelPicklerUnpickler extends SPickler[StorageLevel] with Unpickler[StorageLevel] {
+  /*implicit*/ object StorageLevelPicklerUnpickler extends SPickler[StorageLevel] with Unpickler[StorageLevel] {
 
     val format = null // not used
     def pickle(picklee: StorageLevel, builder: PBuilder): Unit = {
