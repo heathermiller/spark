@@ -218,7 +218,10 @@ private[spark] class Executor(
 
         val resultSer = SparkEnv.get.serializer.newInstance()
         val beforeSerialization = System.currentTimeMillis()
+        // println(s"EXECUTOR: serializing: $value")
         val valueBytes = resultSer.serialize(value)
+        // val up = resultSer.deserialize[Any](valueBytes)
+        // println(s"EXECUTOR: deserialized: $up")
         val afterSerialization = System.currentTimeMillis()
 
         for (m <- task.metrics) {

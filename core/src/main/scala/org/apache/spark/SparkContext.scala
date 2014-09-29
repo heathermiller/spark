@@ -867,7 +867,11 @@ class SparkContext(
       allowLocal: Boolean
       ): Array[U] = {
     val results = new Array[U](partitions.size)
-    runJob[T, U](rdd, func, partitions, allowLocal, (index, res) => results(index) = res)
+    // println(s"runtime class of results array: ${results.getClass.getName}")
+    runJob[T, U](rdd, func, partitions, allowLocal, (index: Int, res: U) => {
+      // println(s"runtime class of result: ${res.getClass.getName}")
+      results(index) = res
+    })
     results
   }
 
