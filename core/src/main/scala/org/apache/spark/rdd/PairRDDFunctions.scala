@@ -745,7 +745,14 @@ class PairRDDFunctions[K: ClassTag, V: ClassTag](self: RDD[(K, V)])
   /**
    * Return an RDD with the keys of each tuple.
    */
-  def keys: RDD[K] = self.map(_._1)
+  def keys: RDD[K] = {
+    var set = Set[String]()
+    self.asInstanceOf[RDD[Any]].foreach { elem =>
+      set += elem.getClass.getName
+    }
+    println(s"all classes: ${set.mkString(",")}")
+    self.map(_._1)
+  }
 
   /**
    * Return an RDD with the values of each tuple.

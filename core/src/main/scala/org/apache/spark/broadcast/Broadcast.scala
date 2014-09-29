@@ -22,6 +22,8 @@ import java.util.concurrent.atomic.AtomicLong
 
 import org.apache.spark._
 
+import scala.reflect.ClassTag
+
 /**
  * A broadcast variable. Broadcast variables allow the programmer to keep a read-only variable
  * cached on each machine rather than shipping a copy of it with tasks. They can be used, for
@@ -91,7 +93,7 @@ class BroadcastManager(val _isDriver: Boolean, conf: SparkConf) extends Logging 
 
   private val nextBroadcastId = new AtomicLong(0)
 
-  def newBroadcast[T](value_ : T, isLocal: Boolean) =
+  def newBroadcast[T: ClassTag](value_ : T, isLocal: Boolean) =
     broadcastFactory.newBroadcast[T](value_, isLocal, nextBroadcastId.getAndIncrement())
 
   def isDriver = _isDriver
