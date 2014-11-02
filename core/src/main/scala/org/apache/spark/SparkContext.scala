@@ -1177,11 +1177,7 @@ class SparkContext(config: SparkConf) extends SparkStatusAPI with Logging {
       allowLocal: Boolean
       ): Array[U] = {
     val results = new Array[U](partitions.size)
-    // println(s"runtime class of results array: ${results.getClass.getName}")
-    runJob[T, U](rdd, func, partitions, allowLocal, (index: Int, res: U) => {
-      // println(s"runtime class of result: ${res.getClass.getName}")
-      results(index) = res
-    })
+    runJob[T, U](rdd, func, partitions, allowLocal, (index, res) => results(index) = res)
     results
   }
 
