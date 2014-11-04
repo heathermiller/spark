@@ -12,7 +12,7 @@ import org.apache.spark._
 import org.apache.spark.SparkContext._
 import org.apache.spark.rdd.RDD
 import org.apache.spark.util.{ByteBufferInputStream, NextIterator}
-import org.apache.spark.scheduler.MapStatus
+import org.apache.spark.scheduler.{MapStatus, CompressedMapStatus}
 import org.apache.spark.storage._
 import org.apache.spark.network.nio.{GetBlock, GotBlock, PutBlock}
 
@@ -28,10 +28,10 @@ import org.apache.spark.rdd.FlatMappedRDD
 import scala.reflect.{ClassTag, classTag}
 import scala.reflect.runtime.{universe => ru}
 
-// import scala.pickling._
-// import binary._
-import scala.pickling.{OutputStreamOutput => _, _}
-import fastbinary.{FastOutputStreamOutput => OutputStreamOutput, _}
+import scala.pickling._
+import binary._
+// import scala.pickling.{OutputStreamOutput => _, _}
+// import fastbinary.{FastOutputStreamOutput => OutputStreamOutput, _}
 
 // for the movielens benchmark, this is what's serialized
 // along with the number of times each thing is serialied
@@ -129,6 +129,10 @@ class PicklingSerializer extends org.apache.spark.serializer.Serializer {
   // register[ShuffleMapTask]
   register[DirectTaskResult[_]]
   register[MapStatus]
+  // CompressedMapStatus must be registered, otherwise generic runtime pickling
+  // would be used, ignoring Externalizable logic
+  register[CompressedMapStatus]
+
   // register[ShuffleDependency[_, _]]
   // register[ResultTask[_, _]]
   // register[FlatMappedRDD[_, _]]
@@ -186,7 +190,14 @@ class PicklingSerializerInstance(serializer: PicklingSerializer,
   def serialize[T: ClassTag](t: T): ByteBuffer = {
     // println(s"SPARK: pickling class '${t.getClass.getName}' as Any")
 
-    val binPickle = (t: Any).pickle
+    val binPickle = try {
+      (t: Any).pickle
+    } catch {
+      case e: Throwable =>
+        println(s"SPARK PicklingSerializer: exception while pickling $t as Any [${t.getClass.getName}]")
+        e.printStackTrace()
+        throw e
+    }
     val arr = binPickle.value
     ByteBuffer.wrap(arr)
   }
